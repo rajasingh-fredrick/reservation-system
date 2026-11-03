@@ -151,6 +151,12 @@ Maintain a separate reusable catalog:
 
 An event song references a library song and the music sheets selected for that event; it is not a separate copy of the library song or its uploaded files.
 
+### Season-specific song roles
+- When adding a library song to a season's event, offer Opening Song, Closing Song, Special Song, or Offertory Song, with Not specified for existing or unclassified songs.
+- Store one nullable role per season/library-song pair, not on the library song or individual event. All appearances in that season share the role; other seasons are unaffected.
+- Display the selected role as text on season event-song cards, not an inline dropdown. Offer the role dropdown only when adding or editing an event song. Administrators can update or clear it in Edit setup, saving it atomically with the other setup changes. Show the role in parent browsing and the season preview.
+- Roles are descriptive labels only: do not change song order, capacity, extra-song eligibility, or existing reservations. Copying an event must use the destination season's role, not overwrite it with the source role.
+
 Definitions:
 - A **season** is a named program with a custom date range.
 - A **performance/event** is a dated occurrence within a season, usually weekly.
@@ -180,6 +186,18 @@ Administrators can create and edit seasons with:
 - Cancellation cutoff.
 - Status: Draft, Published, Registration Closed, Completed, or Archived.
 
+### First-publication registration notification
+- When an administrator first saves a season with status Published (including creating it as Published), require a notification date and time before publication succeeds.
+- Enter the notification date and time in the season's IANA timezone; display the timezone explicitly and persist the resolved UTC instant.
+- Default the notification prompt to the registration opening date and time currently entered in the season form, in that same timezone. Administrators may override it; a default in the past still requires a future time before publication.
+- Require a future notification time. Cancelling the scheduling prompt must not publish or save the season.
+- Atomically save the season, its first-publication timestamp, and its notification schedule; enforce this requirement server-side, including concurrent publication requests.
+- Prompt only on the first successful publication. Subsequent edits, unpublishing, and republishing must not create another schedule or silently change the original one.
+- Preserve existing seasons as historical publications when they are already beyond Draft during migration; do not generate retroactive notifications.
+- Persist the scheduled timestamp and a nullable delivery-completion timestamp so a separate process can find due, unsent registration announcements. This change only schedules delivery; it must not send email or start an in-process timer.
+- The separate sender must check that the season is Published, target verified parent accounts, handle delivery/retries without duplicates, and mark completion only after successful delivery.
+- Show the stored notification schedule to administrators, using the timezone in which it was scheduled, and distinguish scheduled delivery from completed delivery.
+
 Support:
 - Multiple seasons with overlapping dates.
 - Weekly event generation within a season’s date range.
@@ -196,6 +214,17 @@ Support:
 - Provide Show all and Reset filters actions; resetting restores Draft and Published.
 - Show the number of matching seasons and distinguish an empty database from no matching filter results.
 - Filter only the administrator's displayed list, preserving existing date ordering and all season records. Retain the selected filters during data refreshes; a fresh page visit uses the default selection.
+
+### Event slider navigation
+- In administrator Seasons and events, its season preview, and parent Seasons and reservations, display one event at a time per season instead of stacking all event rows. Reuse the shared event slider.
+- Provide keyboard-accessible Previous and Next buttons and a labeled date/time-and-name selector to jump directly to an event. Use the season timezone and chronological event order.
+- Show the current event number and total; announce event changes to assistive technology. Do not auto-advance.
+- Disable Previous at the first event and Next at the last, including both for a single event. Keep the existing empty-season guidance when there are no events.
+- Keep each season's selection independent and preserve the selected event by ID during refreshes and date edits. If it is removed, show the first remaining event.
+- Preserve event editing, copying, draft deletion, song setup, and confirmed-reservation details for the visible event. Keep alternating white/light-indigo backgrounds by event position.
+- For parent browsing, apply the existing season, date, instrument, and availability filters before slider navigation. Count and navigate only matching events; if the selection is filtered out, show the first matching event. Preserve the no-matching-events message.
+- Preserve parent song information, sheet previews/downloads, instrument and spot details, child eligibility, booking, and cancellation controls. Keep Your reservations separate from event navigation.
+- Keep controls usable on mobile without horizontal page overflow. This navigation does not change reservation rules or server authorization.
 
 ### Season deletion
 - Provide a clearly labeled Delete season action for administrators, regardless of season status.
@@ -248,7 +277,7 @@ The library management page is an administrator-facing view of the catalog, not 
 For each event, administrators can:
 - See a read-only list of confirmed reservations showing each child's full name, song, selected instrument, and spot number directly on Seasons & events.
 - See a clear "No confirmed reservations yet" message when an event has no occupied spots. Cancelled and administrator-cancelled reservations must not appear as occupied spots.
-- Keep reservation names administrator-only through server-side authorization; parent browsing must continue hiding other families' children's names. Refreshing administrator data must update these event lists.
+- Keep full reservation rosters administrator-only through server-side authorization. Parent browsing may expose only the signed-in parent's own registered children's names and spot numbers alongside instruments as specified in Section 9, never other families' names, private profiles, or reservation controls. Refreshing administrator data must update these event lists.
 - Select library songs, reorder them, or remove them from the event.
 - Choose one or more of each song's library sheets for that event.
 - Set event-specific notes without overwriting the library song's notes.
@@ -302,7 +331,7 @@ Provide season details showing:
 - For each entry, display DATE, SONG NAME, all music sheets selected for that event with preview/download access, all song links, library notes, and event-specific notes.
 - Show every requested instrument for each song, its availability, and a registration action for each available spot so parents can register an eligible child.
 - Selecting an instrument must show the associated event, song details, and instrument availability in read-only form; parents cannot edit the schedule, song details, or instrument requirements.
-- Keep occupied spots visible and clearly labeled Reserved. Their details remain viewable but read-only, with no registration action for the occupied spot and no disclosure of another family's child's name.
+- Keep occupied spots visible and clearly labeled Reserved. Show only the signed-in parent's own confirmed children's names next to the instrument in the song listing and song/instrument details panel, and associate each name with its reserved spot. Never display other families' children's names. Exclude cancelled reservations. Occupied spots remain read-only with no registration action.
 - An instrument with remaining capacity must still allow registration for its available spots even when other spots for that instrument are reserved.
 - Preserve the signed-in parent's ability to view and cancel their own reservations according to Section 11.
 
@@ -384,8 +413,8 @@ Protect children’s information by default.
 
 - Administrators can view full names and registration details.
 - Parents can view full details only for their own children.
-- Other authenticated parents see only Reserved next to an occupied spot, never the registered child's name or identifying details.
-- Enforce this restriction in parent-facing API responses as well as the interface; administrators retain authorized roster access, and parents can still view their own children's reservations.
+- Verified parents browsing published seasons may see only their own confirmed children's full names next to the instrument and reserved spot. Other families' occupied spots must remain anonymous and labeled Reserved.
+- Enforce name visibility in parent-facing API responses, not just the interface: include names and spot numbers only for children belonging to the signed-in parent, while counting all confirmed reservations for availability. Do not expose other families' names, private profiles, child IDs, reservation IDs, or parent information. Administrators retain authorized roster access, and parents can view and manage only their own children's reservations.
 - Never display children’s birth details, experience notes, parent contact details, or additional information to other families.
 - Do not make rosters or music sheets publicly accessible.
 - Do not include unnecessary sensitive information in notifications or logs.
@@ -446,10 +475,20 @@ Send transactional emails for:
 - Cancellation.
 - Significant schedule, song, or instrument changes affecting a reservation.
 - Event reminders.
+- New-season registration announcements scheduled by the administrator at first publication (delivered by a separate process, not by the publishing request).
 
 Make reminder timing configurable at the church level.
 
 Email delivery failures must be visible to administrators and retryable. A failed confirmation email must not lose or undo a valid reservation.
+
+### Child-profile welcome and acknowledgement
+- After a verified parent successfully submits their first child profile, send the welcome template from Section 5 of notification-implementation.md, personalized with parent name, child name, and the configured APP_URL parent dashboard link.
+- Additional child submissions receive a short acknowledgement, not another full welcome. Edits, approval, archiving, account creation, and failed submissions do not trigger either email.
+- Explain pending approval, separate performance reservations, ministry leadership, and practice recordings at least three days before a performance. Do not promise automatic reminders until their sender is implemented.
+- Atomically record delivery work with the child submission and serialize first-child detection per parent. Do not send retroactively to existing families.
+- Send only after commit, privately to the current verified parent email. Email failure must not undo the saved child profile.
+- Persist delivery status and attempts, expose pending/failed work to administrators, and permit explicit retries without resending completed messages. Do not automatically retry uncertain in-flight deliveries after a crash.
+- Development logs are previews, not actual email deliveries; distinguish them from production SMTP acceptance.
 
 ### Administrator-composed email
 - Provide an administrator-only interface to compose a plain-text email with a subject and message body.
@@ -470,8 +509,13 @@ Create a cohesive, polished interface rather than a generic CRUD dashboard.
 ### Visual direction
 - Warm, welcoming, family-friendly, and appropriate for a church music ministry.
 - Clean layouts, generous spacing, readable typography, and consistent components.
-- A restrained color palette with strong contrast.
-- Subtle music-related imagery or illustrations without clutter.
+- Use a flat muted-indigo, lavender-white, and warm-amber palette across parent, administrator, authentication, and setup screens. Page background: `#F7F7FB`; cards: `#FFFFFF`; primary actions: `#57549A`; selected surfaces and navigation: `#EEEDF8`; borders: `#DEDFEB`; main text: `#2D3042`; secondary text: `#65677B`; decorative accent: `#D9AF62`.
+- Reuse the semantic color tokens and component classes in `src/app/globals.css`. The existing `gradient-canvas`, `gradient-surface`, `gradient-brand`, and `gradient-tint` class names are retained for compatibility but render solid colors, not gradients. Do not reintroduce gradients or shimmering backgrounds.
+- Preserve rounded/beveled edges, inset border highlights, and gentle shadows on cards and buttons. Use solid indigo primary/accent buttons with white labels and darker indigo hover/pressed states. Keep inputs and secondary buttons white. Reserve warm amber for small decorative accents; use a darker amber for readable warning text.
+- Use Plus Jakarta Sans for body text and bold, tightly tracked headings, with dark slate labels and indigo links. Keep most surfaces neutral and use pale lavender for selected controls, chips, and alternating event panels. Existing `forest-*` token names represent the indigo brand scale; keep green reserved for semantic success statuses.
+- Preserve semantic warning, success, and destructive colors; never make a destructive action look like a primary action. Keep labels and icons alongside status colors.
+- Maintain WCAG AA text contrast, visible indigo keyboard focus, disabled/busy states, and reduced-motion behavior. Do not use pale lavender or decorative amber as body text on white.
+- Use the supplied `public/music_icon.jpg` through the shared `MusicIcon`/`HarmonyMark` components for every music icon, brand mark, and decorative music illustration, and for browser/install icons. Do not introduce alternate music glyphs or Lucide music icons. Keep decorative images hidden from assistive technology and retain nearby text labels.
 - Clear visual hierarchy and prominent primary actions.
 
 ### Parent experience
@@ -507,6 +551,13 @@ Before implementation:
 - Do not silently change the regular-song or season-specific extra-song reservation limits in Section 10.
 
 Implementation requirements:
+- Use MySQL 8.0.16 or newer (8.4 LTS recommended), InnoDB, utf8mb4, and Drizzle's MySQL adapter, including Better Auth's MySQL provider. Do not introduce PostgreSQL/PGlite into the application runtime or add an embedded fallback. The development-only PGlite dependency is solely for the legacy recovery script.
+- Local MySQL defaults: host `127.0.0.1`, port `3306`, user `appuser`, database `harmony`. Read credentials from process environment or a secret manager. Never write database passwords into source, scripts, documentation, logs, or committed configuration.
+- Use `npm run db:migrate` to create the database and apply versioned migrations, and `npm run db:check` to inspect installed tables and migration history. On Windows, `npm run db:session` prompts securely and opens a temporary credential-bearing shell without saving the password.
+- Store datetimes in UTC and calendar dates as MySQL DATE. Initialize pooled connections with UTC, ANSI_QUOTES, and READ COMMITTED isolation. Numbered SQL binds are translated to MySQL placeholders by the shared executor; use native MySQL SQL elsewhere.
+- Preserve foreign keys and CHECK constraints. Enforce active-booking uniqueness with a nullable generated column and unique indexes (MySQL does not support PostgreSQL partial indexes). Cancelled bookings must retain history without blocking new bookings.
+- Serialize schema migrations with a database advisory lock and verify checksums. MySQL DDL commits implicitly: report migration failures explicitly and repair partial DDL before retrying; never claim it rolled back.
+- Database integration tests must create and clean up uniquely named `harmony_test_*` databases on MySQL, never truncate or drop the application database. Legacy recovery uses `npm run db:import-legacy -- --source <directory>` for a rollback-only rehearsal, then `--apply` after approval. Always read a copy of the old database, preserve uploaded files and MySQL migration history, verify persisted values, and reject conflicting records rather than overwriting them. See `BUILD.md` for the secure credential-prompt workflow.
 - Persistent database storage with migrations.
 - Relational integrity and database-enforced booking constraints.
 - Separate persistent entities for library songs, music sheets and retained file versions, event song assignments, and event sheet selections, with foreign keys that prevent deletion of referenced library records.
@@ -554,14 +605,14 @@ The application is acceptable only when:
 24. The Add Song interface collects Song Name, optional notes, multiple PDF uploads, and multiple editable links in a single workflow, and saved details persist when the song is reopened.
 25. Event creation collects a date and supports multiple library songs; selecting each song immediately displays its sheets, links, and notes, and administrators can select multiple instrument types with separate capacities for that song.
 26. Parents browsing a season see every event song by date, including its selected sheets, links, notes, requested instruments, and available registration actions for eligible children.
-27. Selecting an instrument displays read-only event/song/instrument details. Occupied spots remain visible as Reserved without exposing another family's child's name in the interface or API response, while any remaining spots stay bookable under Section 10.
+27. Selecting an instrument displays read-only event/song/instrument details. Only the signed-in parent's own confirmed children's names appear next to the instrument in the song listing and details panel, associated with their reserved spots. Other families' names are absent from both the interface and API response. Occupied spots remain Reserved and read-only; cancelled occupants are excluded and remaining spots stay bookable under Section 10.
 28. Administrators can mark an assigned song as an extra song for one season, with the setting shared across its event appearances but absent from the library record and not carried to another season by song reuse or event copying.
 29. An eligible child can reserve each marked extra song once per season, before or after a regular-song reservation, including at the same event. Cancellation releases the corresponding allowance, and concurrent requests cannot exceed either limit.
 30. Extra-song settings are administrator-only and audited. Published-season changes require impact confirmation, and disabling is rejected without changing settings or reservations when it would leave multiple confirmed regular-song bookings for a child.
 31. Administrators can compose an email, send it immediately to all verified parents or any selected set of one or more verified parents, and see which recipients succeeded or failed without exposing addresses to other recipients.
 32. Administrators can delete a season and its events after confirmation only when it has no reservation history. All reservation statuses block deletion, shared library content remains intact, and failed deletions leave the season unchanged.
 33. Seasons & events initially shows only Draft and Published seasons. Administrators can select any combination of statuses, show all seasons, reset to the defaults, and see an informative empty state when no seasons match.
-34. Each event on Seasons & events displays the children holding confirmed reservations with their song, instrument, and spot number. Cancelled bookings are excluded, empty events are clearly labeled, and other families' children's names remain inaccessible to parents.
+34. Under each song on Seasons & events, display a Confirmed reservations section with its count, children's names, instruments, and spot numbers. Match reservations by event-song ID, not song title, so repeated songs or identical titles never mix participants. Exclude cancelled bookings and clearly label songs with no confirmed reservations. Parent season browsing exposes only the limited confirmed-occupant details permitted by Sections 9 and 12.
 
 ## 18. Deliverables and Scope
 

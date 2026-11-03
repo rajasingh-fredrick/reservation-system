@@ -1,6 +1,10 @@
 # Notification Implementation Plan
 
-Status: Proposal only. No application changes have been implemented and no emails have been sent as part of this plan.
+Status: Welcome and additional-child acknowledgement emails are implemented from
+sections 3 and 5, with durable delivery tracking and administrator retries.
+Season publication scheduling is implemented separately; its sender and the
+performance-reminder process remain future work. Development emails are log
+previews; this document does not establish that production email has been sent.
 
 ## Church and ministry details
 
@@ -55,7 +59,12 @@ This plan includes one reminder at seven days, not an additional automatic email
 
 Send one welcome email when a parent successfully submits their first child profile, rather than simply creating an account.
 
-Additional child registrations would receive a short acknowledgement rather than repeating the full welcome email.
+Additional child registrations receive a short acknowledgement rather than repeating the full welcome email.
+
+Implementation note: the section 5 template is sent as plain text with real parent,
+child, and dashboard values. The one-week-reminder promise is omitted until that
+separate sender is implemented. Email failures preserve the child registration and
+are visible/retryable under the administrator's Email parents page.
 
 ### Content
 
@@ -169,8 +178,8 @@ Template note: omit the location line when no location is available. Replace all
 
 ## 8. Scope boundaries
 
-- This document records the proposed plan and draft email content only.
-- Do not implement notification behavior until the plan and outstanding decisions are approved.
+- Sections 3 and 5 were approved for implementation. Other proposed notification
+  delivery behavior remains subject to approval.
 - No recording upload feature is included unless separately approved.
 - No additional automatic three-day reminder is included.
-- No changes to application code or the existing requirements document are part of creating this document.
+- The welcome implementation updates application code and the requirements document.
