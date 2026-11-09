@@ -1,10 +1,11 @@
 # Notification Implementation Plan
 
-Status: Welcome and additional-child acknowledgement emails are implemented from
-sections 3 and 5, with durable delivery tracking and administrator retries.
-Season publication scheduling is implemented separately; its sender and the
-performance-reminder process remain future work. Development emails are log
-previews; this document does not establish that production email has been sent.
+Status: Welcome, additional-child acknowledgement, administrator registration,
+scheduled season announcements, and consolidated performance reminders have
+durable delivery tracking. The hourly backend entry point is
+`npm run notifications:send`; configure an external scheduler to invoke it.
+Development emails are log previews; this document does not establish that
+production email has been sent.
 
 ## Church and ministry details
 
@@ -22,7 +23,8 @@ Send one announcement when a season first transitions from Draft to Published. D
 
 ### Recipients and content
 
-- Send to parent accounts with verified email addresses. Confirm whether unverified addresses should also be included.
+- Send only to registered parent accounts with verified email addresses and an
+  explicit email subscription. Recheck eligibility immediately before delivery.
 - Include the season name, start and end dates, and registration opening and closing times. Do not include a week count.
 - Invite parents to register their children while spots are available, without promising that a spot is still open.
 - Include a link to the season or parent registration page.
@@ -62,8 +64,9 @@ Send one welcome email when a parent successfully submits their first child prof
 Additional child registrations receive a short acknowledgement rather than repeating the full welcome email.
 
 Implementation note: the section 5 template is sent as plain text with real parent,
-child, and dashboard values. The one-week-reminder promise is omitted until that
-separate sender is implemented. Email failures preserve the child registration and
+child, and dashboard values. The current welcome email omits a reminder promise
+because reminders depend on the parent's current subscription and the configured hourly job.
+Email failures preserve the child registration and
 are visible/retryable under the administrator's Email parents page.
 
 ### Content
@@ -165,21 +168,97 @@ Ministry Coordinator
 
 Template note: omit the location line when no location is available. Replace all placeholders with actual values before sending.
 
-## 7. Decisions to finalize before implementation
+## 7. Backend notification jobs and subscriptions
 
-- Whether to include parent accounts whose email addresses are not verified.
-- The destination URL for the season announcement's registration link.
-- Recording submission method: email, WhatsApp, shared upload link, or an in-app upload. No upload feature is assumed in this plan.
-- Coordinator contact details for submissions and questions.
-- Church time zone and recording-deadline cutoff time, displayed explicitly in the email.
-- Approval of the proposed first-child welcome trigger.
-- Approval of the proposed late-registration behavior.
-- Approval or revision of both email drafts.
+- Run `npm run notifications:send` from the application directory once per hour.
+  The command runs once and exits; it does not install a scheduler or run a daemon.
+- Apply migration `0011` using `npm run db:migrate` before deployment. It adds
+  opt-in preferences, publication audience tracking, and the automated delivery queue.
+- Apply migration `0012` for the durable immediate email queue. Run
+  `npm run notifications:work` as a separately supervised, continuously running
+  process. It polls every second and delivers immediate emails without waiting
+  for the hourly job; no web request contacts SMTP. Delivery latency depends on
+  backlog and the SMTP service. Neither command installs a scheduler/service.
+- Queue verification and password-reset links for existing accounts, bound to the
+  current email and token expiry (24 hours / 1 hour). Unverified accounts must
+  be eligible for these security messages; parent ministry notifications still
+  require registration and verification. Expired or ineligible queued messages
+  are Skipped. Clear general message bodies after Sent/Preview/Skipped; protect
+  database and backup access to pending token-bearing messages.
+- Save profile decisions, booking/cancellation/review work, and their email tasks
+  atomically. Administrator-composed broadcasts queue private per-parent tasks
+  and audit counts in one transaction. Recheck subscription at delivery.
+- Set `NODE_ENV=production` for actual SMTP. The command loads the existing
+  application environment configuration. Set `APP_URL`, `SMTP_HOST`, `SMTP_FROM`,
+  the remaining provider settings, and `RECORDING_SUBMISSION_INSTRUCTIONS`.
+  Instructions must be supplied by the coordinator; no recording upload or
+  submission method is invented. Keep passwords in the process environment or a
+  secret manager, not scheduler command-line arguments or committed files.
+- Parents manage their preference using **Email notifications** in Family Workspace.
+  New profiles are subscribed by default; migration `0013` changes the default
+  without altering existing preferences. This controls season announcements,
+  performance reminders, and administrator-composed ministry announcements.
+  Administrators with their own children are parents too: child registration creates
+  a missing parent profile, and migration `0014` repairs existing child-owner accounts.
+  These profiles use the default subscription without inventing consent acceptance;
+  saved preferences and administrator permissions are preserved.
+  Account verification/recovery and transactional child-profile/reservation emails
+  remain separate; the earlier question about opting out of those is unresolved.
+- At each run, snapshot the subscribed, verified parent audience for each due
+  first-publication schedule. Later season edits or newly subscribed parents do
+  not regenerate an already-queued announcement. Expired registration periods and
+  unpublished seasons are not announced.
+- Discover confirmed families for events in Published or Registration Closed
+  seasons, beginning at midnight seven calendar days before the performance in
+  the season's church timezone. Hourly delivery may be up to an hour after that
+  boundary. If the scheduler was offline, catch up while the event is still upcoming.
+- Consolidate all currently confirmed children/songs/instruments, including extra
+  songs, into one reminder per family and event. Re-read reservations, event time,
+  season status, verification, registration, and subscription before sending.
+- Recording deadline: end of the church-local calendar date three days before
+  the event, explicitly shown with the timezone. Late reminders flag a passed
+  deadline. Pending/Skipped reminders use a rescheduled event's current date;
+  previously Sent reminders are not sent again after a reschedule.
+- The immediate worker processes Pending child-profile notifications, including
+  the separate administrator recipient, using their existing templates and claims.
+  Welcome, acknowledgement, approval/rejection, booking, cancellation, review,
+  administrator-composed, verification, and password-reset emails all use backend
+  delivery. The hourly job processes a bounded immediate-queue fallback batch.
+  Neither job replays source requests or backfills historical mail.
+- Child-profile approval and rejection emails identify the child by their saved full name; rejection emails retain the coordinator's note.
+- Scheduled tasks retry once per hourly run. Immediate general-email failures
+  retry with exponential backoff from one minute to one hour; child-registration
+  failures retry hourly. Each immediate batch takes at most 100 records from each
+  queue and prioritizes account-security mail. A failure does not spin in a loop.
+  Unique recipient/entity keys and transactional claims prevent normal duplicate
+  delivery, including when the immediate worker overlaps the hourly job.
+- A database-scoped advisory lock prevents overlapping command executions.
+  Sent and Preview tasks are not resent. A process interrupted after claiming a
+  task leaves Sending for operator investigation; it is never blindly reclaimed.
+  SMTP is not exactly-once: a provider accepting mail before a connection drops
+  can leave an ambiguous failure, and retrying may duplicate that email.
+- See **Email parents** for automated delivery status and attempts. Correct SMTP
+  configuration before the next hourly retry. Investigate Sending records with
+  the mail provider before any manual recovery. A season is marked complete only
+  when its announcement records are Sent/Skipped, never on a failed delivery.
+- The command logs aggregate counts, closes database connections, and exits
+  nonzero on processing errors, Failed tasks, or interrupted Sending work.
+  Scheduler logs should be monitored. Development Preview rows are not production
+  delivery; do not run development previews against the production database.
 
-## 8. Scope boundaries
+## 8. Remaining decisions
 
-- Sections 3 and 5 were approved for implementation. Other proposed notification
-  delivery behavior remains subject to approval.
+- Supply coordinator-approved recording submission instructions in the job environment.
+- Decide whether unsubscribing should also affect transactional child/reservation
+  emails. They currently retain existing behavior.
+- Booking confirmations do not yet include the proposed late-registration
+  recording instructions. Late-registered families receive the next hourly
+  reminder if their family/event reminder has not already been sent.
+
+## 9. Scope boundaries
+
+- The hourly sender implements the season-announcement and performance-reminder
+  behavior above; it does not install an operating-system scheduler.
 - No recording upload feature is included unless separately approved.
 - No additional automatic three-day reminder is included.
 - The welcome implementation updates application code and the requirements document.

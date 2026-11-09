@@ -52,7 +52,7 @@ Administrators can also:
 - Invite an existing or new user to become an administrator.
 - Grant administrator access only after the user has verified their email.
 - Revoke administrator privileges.
-- Compose and immediately send an email notification to all verified parents or a selected group of one or more verified parents.
+- Compose and queue an email notification for prompt backend delivery to subscribed, verified parents or a selected group.
 - Use parent features if they also register their own children.
 
 Requirements:
@@ -195,7 +195,7 @@ Administrators can create and edit seasons with:
 - Prompt only on the first successful publication. Subsequent edits, unpublishing, and republishing must not create another schedule or silently change the original one.
 - Preserve existing seasons as historical publications when they are already beyond Draft during migration; do not generate retroactive notifications.
 - Persist the scheduled timestamp and a nullable delivery-completion timestamp so a separate process can find due, unsent registration announcements. This change only schedules delivery; it must not send email or start an in-process timer.
-- The separate sender must check that the season is Published, target verified parent accounts, handle delivery/retries without duplicates, and mark completion only after successful delivery.
+- The hourly sender must check that the season is Published, target registered, verified, subscribed parent accounts, track each recipient independently, and mark completion only after every intended delivery is Sent or no longer eligible (Skipped).
 - Show the stored notification schedule to administrators, using the timezone in which it was scheduled, and distinguish scheduled delivery from completed delivery.
 
 Support:
@@ -434,7 +434,7 @@ Provide a separate, responsive administration area with:
 
 ### Management pages
 - Seasons and publication status.
-- Parent email notifications with recipient selection and immediate delivery.
+- Parent email notifications with recipient selection and prompt backend-worker delivery.
 - Events and songs.
 - Instrument requirements and capacity.
 - Song library with search, song details, multiple-sheet uploads, sheet editing/replacement, usage visibility, archiving, and deletion controls.
@@ -492,15 +492,30 @@ Email delivery failures must be visible to administrators and retryable. A faile
 
 ### Administrator-composed email
 - Provide an administrator-only interface to compose a plain-text email with a subject and message body.
-- Let administrators select one parent, multiple parents, or all parent accounts. The all-parents action targets the current set of parent accounts with verified email addresses.
+- Let administrators select one parent, multiple parents, or all subscribed parent accounts. Both selected and all-parents actions target the current set of registered parent accounts with verified email addresses and an active email subscription.
 - Show parent names and email addresses in the recipient picker, with search and an accessible select-all/clear-all control.
-- Send immediately when the administrator confirms the send action; do not schedule or queue these user-composed messages.
+- Queue each recipient's message durably when the administrator confirms; the immediate backend worker sends it without waiting for the hourly schedule. Save the broadcast tasks and audit together in one transaction.
 - Send each recipient a separate message so parent email addresses are never disclosed to other recipients.
 - Enforce administrator authorization and same-origin write checks on the server, validate and bound input, rate-limit sends, and record an audit entry with counts but not message contents.
-- Report full and partial delivery outcomes clearly. Do not report failed recipients as sent; allow the administrator to retry only failed recipients without resending to recipients who already received the message.
+- Report enqueue acceptance as queued, never sent. Display per-message delivery statuses in Email parents; the backend retries failed tasks without resending completed messages.
 - A delivery failure must not block other recipients from receiving their messages.
 
 Optional in-app notices may supplement email. Do not make SMS or push notifications mandatory for the initial release.
+
+### Hourly automated email delivery and subscriptions
+- Provide Subscribe/Unsubscribe controls in Family Workspace for season announcements, performance reminders, and administrator-composed ministry messages. Existing and new parents start unsubscribed; opt-in must be explicit, persisted, and editable only by the authenticated, verified, registered parent.
+- Account-security and transactional child-profile/reservation emails retain existing behavior. Do not silently interpret optional-email opt-out as disabling account verification or recovery.
+- All email delivery must occur in backend notification jobs, never in web/auth request handlers. Persist immediate work durably; commit profile decisions and reservation changes with their messages in the same transaction. Enqueue failures must not be hidden as success.
+- Run `npm run notifications:work` under a separately configured process supervisor for prompt delivery. Poll immediate queues every second in bounded batches; prioritize verification/reset emails. The hourly job remains responsible for scheduled announcements/reminders and a bounded immediate-email fallback batch. No service is installed automatically.
+- Account-security messages require an existing user, bound email, and expiration matching the token lifetime. They may go to an unverified/non-parent account to enable verification/recovery. Recheck expiry for each delivery, not only at batch start; skip expired links or changed addresses. Clear general-message bodies after Sent/Preview/Skipped and never expose token-bearing bodies in administrator status views.
+- Retry general immediate SMTP failures with one-minute exponential backoff capped at one hour, measured from the failed attempt's completion; retry child-registration failures hourly. Never automatically reclaim uncertain Sending or resend Sent/Preview. Manual child retries only requeue work; they must not call SMTP in the request.
+- Never send parent notifications to an address from arbitrary input or an unregistered/unverified account. Resolve current recipient email from the registered account immediately before sending.
+- Run `npm run notifications:send` as a one-shot backend command under an external hourly scheduler. No web server or in-process timer is required. Close connections on exit and report nonzero status for failures or uncertain Sending records.
+- Snapshot recipients only once per due first-publication schedule. Use durable unique recipient/entity keys, a database-scoped overlap lock, and transactional per-message claims. Retry Pending/Failed messages once per run; never automatically reclaim Sending after interruption or resend Sent/Preview records.
+- Send one consolidated reminder per parent/event starting seven church-local calendar days before an upcoming Published or Registration Closed event. Include all currently confirmed children, songs, instruments, and extra songs. Recheck reservations and preferences at delivery; never include cancelled bookings.
+- Recalculate unsent reminders from current event dates when rescheduled. Recording deadlines are the end of the church-local date three days before the performance; display date/timezone and flag past deadlines. Previously sent reminders are not resent after rescheduling.
+- Require coordinator-supplied `RECORDING_SUBMISSION_INSTRUCTIONS` and APP_URL in the job environment. Never invent a recording submission method.
+- Expose automated delivery statuses/attempts alongside child-profile email tracking under Email parents. Distinguish SMTP acceptance from inbox delivery and development Preview from Sent. Do not claim exactly-once SMTP delivery.
 
 ## 15. Visual Design and Accessibility
 
@@ -609,7 +624,7 @@ The application is acceptable only when:
 28. Administrators can mark an assigned song as an extra song for one season, with the setting shared across its event appearances but absent from the library record and not carried to another season by song reuse or event copying.
 29. An eligible child can reserve each marked extra song once per season, before or after a regular-song reservation, including at the same event. Cancellation releases the corresponding allowance, and concurrent requests cannot exceed either limit.
 30. Extra-song settings are administrator-only and audited. Published-season changes require impact confirmation, and disabling is rejected without changing settings or reservations when it would leave multiple confirmed regular-song bookings for a child.
-31. Administrators can compose an email, send it immediately to all verified parents or any selected set of one or more verified parents, and see which recipients succeeded or failed without exposing addresses to other recipients.
+31. Administrators can compose an email, queue it for prompt backend delivery to all subscribed, verified parents or a selected set, and see per-message delivery statuses without exposing addresses to other recipients.
 32. Administrators can delete a season and its events after confirmation only when it has no reservation history. All reservation statuses block deletion, shared library content remains intact, and failed deletions leave the season unchanged.
 33. Seasons & events initially shows only Draft and Published seasons. Administrators can select any combination of statuses, show all seasons, reset to the defaults, and see an informative empty state when no seasons match.
 34. Under each song on Seasons & events, display a Confirmed reservations section with its count, children's names, instruments, and spot numbers. Match reservations by event-song ID, not song title, so repeated songs or identical titles never mix participants. Exclude cancelled bookings and clearly label songs with no confirmed reservations. Parent season browsing exposes only the limited confirmed-occupant details permitted by Sections 9 and 12.

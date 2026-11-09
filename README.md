@@ -39,11 +39,12 @@ Additional children receive a short acknowledgement; edits and account creation
 do not send a welcome. Existing families are not emailed retroactively.
 The messages explain pending approval, separate performance reservations, ministry
 leadership, and the three-day practice-recording expectation. They do not promise
-automatic one-week reminders, whose delivery process is not implemented yet.
+automatic one-week reminders unless the separate hourly sender is configured.
 
 Migration `0008` creates `child_profile_notifications`. A per-parent lock serializes
 first-child detection, and the delivery record commits with the child and instruments.
-Delivery then uses the existing sender and the current verified parent email.
+The backend notification worker then delivers to the current registered, verified
+parent email; the registration request itself never contacts SMTP.
 Configure `APP_URL` for the dashboard link and the existing `SMTP_*` settings for
 production. In development, messages are logged as `Preview`, not marked as sent.
 
@@ -53,7 +54,8 @@ roll back registration. Failed SMTP attempts may have ambiguous outcomes (for
 example, a connection dropping after acceptance); inspect the provider before retrying.
 An interrupted process leaves `Sending` work for operator investigation rather than
 automatically risking a duplicate. SMTP acceptance is not proof of inbox delivery.
-No automatic retry worker is started by this feature.
+The immediate worker handles Pending records and retries failures hourly. The
+hourly notification job also processes a bounded fallback batch.
 
 Every new child profile also queues a separate administrator notification to
 `kidsmusic-coord@tamilgospelchurch.org`, including additional children in an existing
@@ -83,8 +85,8 @@ marked as historical publications by migration `0007`; no retroactive announceme
 is scheduled. A Draft that had been published before this feature cannot be
 identified from its current status alone and will be treated as a first publication.
 
-The following `seasons` columns are the integration contract for a **separate
-notification sender** (no worker or email delivery is started by this feature):
+The following `seasons` columns are used by the **hourly notification job**
+(the publishing request never sends email or starts a timer):
 
 - `first_published_at`: UTC first-publication time; for historical seasons, the
   pre-migration `updated_at` is a historical marker, not a reconstructed publication time.
@@ -92,7 +94,9 @@ notification sender** (no worker or email delivery is started by this feature):
 - `registration_notification_timezone`: IANA timezone at scheduling, retained even
   if the season's timezone changes later.
 - `registration_notification_sent_at`: nullable UTC completion time; only the
-  separate sender may set it after successful delivery.
+  separate sender may set it after all intended deliveries are Sent/Skipped.
+- `registration_notification_queued_at`: UTC audience-snapshot time, set atomically
+  with the per-recipient delivery records.
 
 With its MySQL session timezone set to UTC, the sender can discover due work using:
 
@@ -105,12 +109,12 @@ WHERE status = 'Published'
 ORDER BY registration_notification_at, id;
 ```
 
-This query discovers work; it does **not** claim it or guarantee exactly-once
-delivery. Before enabling a sender, implement exclusive job claiming, durable
-per-recipient delivery tracking/idempotency and retries, recheck Published status,
-and select verified parent accounts. Send each parent a separate message. Mark
-completion only after all intended deliveries succeed; never set completion just
-because a job was fetched. Delivery is paused while the season is not Published;
+This example query only discovers work. The implemented sender uses a database
+advisory lock, transactionally snapshots subscribed/verified parent recipients,
+and records each delivery independently. It rechecks eligibility and Published
+status before sending each private message. It marks completion after all
+intended deliveries are Sent/Skipped, not simply when fetching a job.
+Unpublished or expired work is skipped;
 republishing resumes its original unsent schedule, even if it is now overdue.
 Deleting a season without reservation history also deletes its schedule.
 
@@ -146,8 +150,10 @@ Use these shared tokens instead of hardcoded colors when adding pages.
 In administrator Seasons and events, its preview, and parent Seasons and
 reservations, each season shows one event at a time.
 Use Previous/Next or the Jump to event selector to navigate chronologically
-without scrolling through every week. Selection is retained during refreshes;
-if the selected event is deleted, the first remaining event is shown. Cards
+without scrolling through every week. The default is the next event starting at
+or after the current time, or the most recent past event if none are upcoming.
+Selection is retained during refreshes; if the selected event is deleted or
+filtered out, the same default is applied to the remaining events. Cards
 alternate light gradient surfaces and periwinkle/blue gradient tints to make weekly boundaries clearer.
 Parent filters apply before event navigation, so the selector and event count
 include only matching events. Your reservations remain visible separately.
@@ -180,7 +186,7 @@ your network.
 Follow the first-administrator setup instructions on the sign-in screen and in
 the server terminal. Setup requires a server-side setup token; it is not public
 registration. Verify the administrator email before signing in. Development-only
-email links are written to the server terminal when SMTP is not configured.
+email links are written to the notification worker terminal in development mode.
 Production must use real email delivery.
 
 Parents can register at `/register`, verify their email, and sign in to `/parent`.
@@ -197,6 +203,94 @@ The reservation roster and CSV export are available from the admin navigation.
 
 Never commit local configuration, setup tokens, passwords, sessions, uploaded
 music, or database contents.
+
+### Backend email delivery: immediate worker and hourly job
+
+All email is sent by backend jobs, never by web requests. This includes account
+verification/password recovery, child welcome/acknowledgement and coordinator
+alerts, approval/rejection decisions, reservations/cancellations/reviews, and
+administrator-composed messages. Requests persist work and report **queued**, not
+**sent**. Profile/reservation changes and their email tasks commit atomically.
+If enqueueing fails, the transaction fails rather than silently losing the email.
+
+Apply migrations (including `0014_parent_profiles_for_child_owners.sql`),
+then start the continuous worker in its own process:
+
+```powershell
+npm.cmd run db:migrate
+$env:NODE_ENV = "production"
+npm.cmd run notifications:work
+```
+
+Keep this foreground process running under your hosting platform's process
+supervisor, or a separately configured Windows service/task with restart-on-failure.
+Set its working directory to the application directory. It polls every second,
+prioritizes account-security emails, and sends pending immediate messages without
+waiting for the hourly scheduler. Delivery is normally within seconds when idle;
+backlog, SMTP latency, and outages can delay it. Graceful shutdown finishes the
+current bounded batch before closing database connections. Do not rely on a web
+request or Next.js development server to keep the worker alive.
+
+The worker loads application environment files, requires database access and
+production SMTP settings, and does not require the reminder recording setting.
+Use `npm.cmd run notifications:work -- --help` for a no-send usage check, or
+`npm.cmd run notifications:work -- --once` to process one immediate batch.
+The latter can send real emails in production. Neither command installs a service.
+
+Immediate general-email SMTP failures retry after 1, 2, 4, 8, 16, 32, then 60
+minutes from the failed attempt's completion (capped at an hour);
+child-registration failures retry hourly. Completed
+Sent/Preview messages and uncertain Sending tasks are never automatically resent.
+Security-link messages are bound to their account email, expire with their token
+lifetime (verification: 24 hours; reset: 1 hour), and may reach an unverified
+account so verification is possible. They never target an arbitrary input address.
+Expiry is rechecked for each delivery, including during long batches.
+Expired messages are skipped; request a fresh link if needed. Message bodies,
+including security links, are cleared after Sent/Preview/Skipped; restrict database
+and backup access while unsent messages are retained.
+
+Keep the separate hourly job for scheduled announcements and reminders:
+
+Run once from the project directory:
+
+```powershell
+npm.cmd run db:migrate
+$env:NODE_ENV = "production"
+npm.cmd run notifications:send
+```
+
+Configure Windows Task Scheduler to run this command hourly, with **Start in**
+set to the application directory and the required environment available to the
+scheduler account. Alternatively, use your deployment platform's hourly scheduled
+job. The script runs once and exits; no web server is required. Do not start it
+until `APP_URL`, the production `SMTP_*` settings, database access, and
+`RECORDING_SUBMISSION_INSTRUCTIONS` are configured. Do not put credentials in the
+command line. Use `npm.cmd run notifications:send -- --help` for a no-send usage check.
+
+The job handles due season announcements, seven-day consolidated performance
+reminders, and a bounded fallback batch of immediate emails (including admin alerts).
+It retries failures once per hourly run, prevents overlapping jobs, and leaves
+uncertain Sending records for operator review. It reports aggregate counts and
+exits nonzero on errors, failed deliveries, or interrupted Sending records.
+Sent means SMTP acceptance, not guaranteed inbox delivery.
+
+Parents can Subscribe/Unsubscribe under **Family Workspace > Email notifications**.
+New parent profiles are subscribed by default; existing preferences are preserved.
+Administrators can also be parents. Registering their own child creates a missing
+parent profile without changing their administrator access or existing preferences.
+Migration `0014` repairs missing profiles for accounts that already have children;
+it leaves unrecorded registration consent unset rather than marking it accepted.
+Announcements/reminders and admin-composed ministry messages require a registered,
+verified, subscribed parent at send time. Transactional child-profile/reservation
+and account-security emails remain separate. Administrator delivery status appears
+under **Email parents**.
+
+Reminder dates and the three-day recording deadline use the season's timezone,
+including daylight saving changes. The deadline is the end of the specified local
+day. Cancelled reservations are excluded; pending reminders follow rescheduling.
+Development produces Preview records only; never use development mode against a
+production notification database. See [notification-implementation.md](notification-implementation.md)
+for audience snapshot, retry, late-booking, and SMTP ambiguity details.
 
 ## Administrator guide
 
@@ -346,8 +440,9 @@ formal WCAG audit.
    acceptance for new accounts is not implemented.
 - Administrator roster support includes filtering, printing, and CSV export;
    reassignment and bulk operations are not implemented.
-- Email verification, reset, booking, and review messages are sent inline. There
-   is no durable delivery queue, retry UI, or configurable reminder scheduler.
+- Email delivery requires the separately supervised immediate worker and external
+   hourly scheduler; these are not installed automatically. All emails have durable
+   tracking. Reminder timing is currently fixed at seven calendar days.
 - A church-approved retention duration and account/child deletion process have
    not been selected. Archived child records and reservation history are retained;
    establish and document the church policy before production use.
