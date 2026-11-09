@@ -1,0 +1,7 @@
+npm.cmd run db:session
+.\node_modules\.bin\next.cmd dev --hostname 127.0.0.1 --port 3001
+
+DB Migration
+npm.cmd run db:migrate-site -- -SourceHost old-db.example.org -DestinationHost new-db.example.org -Database harmony
+
+source scripts/mysql-bootstrap.sql;
